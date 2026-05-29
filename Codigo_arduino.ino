@@ -44,15 +44,16 @@ const int MORSE_ENCODE[27][5] = {
 
 #define TREE_SIZE (sizeof(MORSE_TREE))
 
-int toSend[5];
-int toRead[5];
+int toSend[5] = {0,0,0,0,0};
+int toRead[5] = {0,0,0,0,0};
 
 // ------------------- Pines -------------------
 
 #define PIN_MAIN      2
 #define PIN_RECEIVE   3
 #define PIN_READ      A0
-#define PIN_GATE      11      
+#define PIN_GATE      11   
+#define PIN_RELE      A5   
 
 #define LED_DOT       8
 #define LED_LINE      9
@@ -65,9 +66,14 @@ char lcd_history[LCD_COLS+1] =
 "                ";
 
 // ------------------- Flags ISR -------------------
-
+// ------------------- Flags ISR -------------------
 volatile bool startSend = false;
 volatile bool startReceive = false;
+
+// Añade estos timestamps para debounce
+volatile unsigned long lastMainISR = 0;
+volatile unsigned long lastReceiveISR = 0;
+#define DEBOUNCE_MS 200
 
 
 // ======================================================
@@ -85,6 +91,7 @@ void setup() {
     pinMode(PIN_READ, INPUT);
 
     pinMode(PIN_GATE, OUTPUT);
+    pinMode(PIN_RELE, OUTPUT);
 
     pinMode(LED_DOT, OUTPUT);
     pinMode(LED_LINE, OUTPUT);
@@ -113,16 +120,14 @@ void loop() {
         startSend = false;
 
         readEntry();
-        sendSignal();
 
     }
 
     if(startReceive){
 
-        startReceive = false;
-
         readSignal();
-
+        
+        startReceive = false;
     }
 
     if(Serial.available() > 0)
@@ -154,15 +159,19 @@ void loop() {
 // ======================================================
 
 void beginEntryISR(){
-
-    startSend = true;
-
+    unsigned long now = millis();
+    if(now - lastMainISR > DEBOUNCE_MS){
+        lastMainISR = now;
+        startSend = true;
+    }
 }
 
 void receiveISR(){
-
-    startReceive = true;
-
+    unsigned long now = millis();
+    if(now - lastReceiveISR > DEBOUNCE_MS){
+        lastReceiveISR = now;
+        startReceive = true;
+    }
 }
 
 
@@ -177,37 +186,43 @@ void readEntry(){
 
     while(read != 2){
 
-        while(digitalRead(PIN_READ)==LOW);
+        while(analogRead(PIN_READ)<= 50);
         unsigned long start = millis();
 
-        while(digitalRead(PIN_READ)==HIGH){
+        delay(20);
+
+        while(analogRead(PIN_READ)> 50){
             unsigned long held = millis()-start;
             digitalWrite(LED_DOT,held>0);
             digitalWrite(LED_LINE,held>2000);
             digitalWrite(LED_END,held>3000);
         }
 
+        delay(20);
+
         digitalWrite(LED_DOT,LOW);
         digitalWrite(LED_LINE,LOW);
         digitalWrite(LED_END,LOW);
 
-        unsigned long duration =  millis()-start;
+        unsigned long duration = millis() - start;
 
-        if(duration<=2000)
-            read=0;
+        if(duration <= 2000)
+            read = 0;
+        else if(duration <= 3000)
+            read = 1;
+        else if(duration > 3000)
+            read = 2;
 
-        else if(duration<=3000)
-            read=1;
+        if(read == 2){          // Si es END, termina sin guardar
+            toSend[i] = 2;      // Pone el terminador en la posición actual
+            break;              // Sale limpiamente
+        }
 
-        else
-            read=2;
-
-
-        toSend[i++] = read;
-
-        if(i>=5){
-            toSend[4]=2;
-            read=2;
+        toSend[i++] = read;     // Solo guarda si es punto o raya
+        
+        if(i >= 5){
+            toSend[4] = 2;
+            read = 2;
         }
     }
 
@@ -215,6 +230,7 @@ void readEntry(){
     Serial.print("T|"); // Tx|Letra
     Serial.println(letra);
     showInDisplay(letra,true);
+    sendSignal();
     Serial.println("S|IDLE");
 
 }
@@ -226,32 +242,39 @@ void readEntry(){
 // ======================================================
 
 void sendSignal(){
+    Serial.println("S|SENDING");
+    digitalWrite(PIN_RELE,HIGH);
+    delay(20);
 
-    Serial.println("S|SENDING"); // STATE|ENVIANDO
+    // Deshabilitar ISRs para que el pulso de salida
+    // no se retroalimente ni el ruido dispare nada
+    detachInterrupt(digitalPinToInterrupt(PIN_MAIN));
+    detachInterrupt(digitalPinToInterrupt(PIN_RECEIVE));
 
-    for(int j=0;j<5;j++){
-
+    for(int j = 0; j < 5; j++){
         int sym = toSend[j];
-
-        digitalWrite(PIN_GATE,HIGH);
-
-        if(sym==0){
-            delay(200);
-        }
-        else if(sym==1){
-            delay(400);
-        }
-        else{
+        if(sym == 2){
+            digitalWrite(PIN_GATE, HIGH);
             delay(600);
+            digitalWrite(PIN_GATE, LOW);
+            delay(100);
+            break;
         }
-
-        digitalWrite(PIN_GATE,LOW);
+        digitalWrite(PIN_GATE, HIGH);
+        delay(sym == 0 ? 200 : 400);
+        digitalWrite(PIN_GATE, LOW);
         delay(100);
-        if(sym == 2)
-        {
-          break;
-        }
     }
+
+    // Limpiar flags que pudieran haberse acumulado
+    startSend = false;
+    startReceive = false;
+
+    // Re-habilitar ISRs
+    attachInterrupt(digitalPinToInterrupt(PIN_MAIN), beginEntryISR, RISING);
+    attachInterrupt(digitalPinToInterrupt(PIN_RECEIVE), receiveISR, RISING);
+
+    digitalWrite(PIN_RELE,LOW);
     Serial.println("S|IDLE");
 }
 
@@ -264,7 +287,7 @@ void readSignal(){
     Serial.println("S|READING"); // STATE|LEYENDO_MORSE
 
     int read=0;
-    int i=0;
+    int index=0;
 
     while(read!=2){
 
@@ -275,18 +298,21 @@ void readSignal(){
         unsigned long duration = millis()-start;
 
 
-        if(duration<400)
+        if(duration<400){
             read=0;
-        else if(duration<600)
+        }
+        else if(duration<600){
             read=1;
-        else
+        }
+        else{
             read=2;
+        }
 
-        toRead[i++] = read;
+        toRead[index++] = read;
 
-        if(i>=5){
+        if(index>=5){
             toRead[4]=2;
-            read=2;
+           read = 2;
         }
 
     }
@@ -295,6 +321,8 @@ void readSignal(){
     Serial.print("R|");
     Serial.println(letra);  // Rx|Letra
     showInDisplay(letra,false);
+    Serial.println("S|IDLE");
+    
 }
 
 
