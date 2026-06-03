@@ -118,15 +118,12 @@ void loop() {
     if(startSend){
 
         startSend = false;
-
         readEntry();
-
     }
 
     if(startReceive){
 
         readSignal();
-        
         startReceive = false;
     }
 
@@ -145,6 +142,7 @@ void loop() {
           sendSignal();
           i++;
         }
+        delay(2000);
         
 
       }
@@ -185,8 +183,14 @@ void readEntry(){
     int i = 0;
 
     while(read != 2){
-
-        while(analogRead(PIN_READ)<= 50);
+        unsigned long hold = millis();
+        while(analogRead(PIN_READ)<= 50)
+        {
+            if(millis() - hold > 3000)
+            {
+                return;
+            }
+        }
         unsigned long start = millis();
 
         delay(20);
@@ -288,20 +292,39 @@ void readSignal(){
 
     int read=0;
     int index=0;
-
+    unsigned long readStart;
     while(read!=2){
 
-        while(digitalRead(PIN_RECEIVE)==LOW );
+        readStart = millis();
+        while(digitalRead(PIN_RECEIVE)==LOW)
+        {
+            if(millis() - readStart > 400)  // Si duramos mucho sin nada
+            {
+                Serial.println("S|IDLE");
+                return;
+            }
+        }
         unsigned long start = millis();
 
-        while(digitalRead(PIN_RECEIVE)==HIGH);
+        readStart = millis();
+        while(digitalRead(PIN_RECEIVE)==HIGH)
+        {
+            if(millis() - readStart > 900)  // Si queda casi un segundo pegado
+            {
+                break;
+            }
+        }
         unsigned long duration = millis()-start;
+        
+        if(duration < 100) // SI es muy corto, se descarta
+        {
+            return;
+        }
 
-
-        if(duration<400){
+        if(duration<350){
             read=0;
         }
-        else if(duration<600){
+        else if(duration<500){
             read=1;
         }
         else{
